@@ -1,0 +1,162 @@
+name: Релиз
+
+# Имя запуска в списке Actions. Без него все сборки называются одинаково, и
+# понять, что собиралось, можно только заглянув внутрь.
+run-name: >-
+  ${{ github.ref_type == 'tag'
+      && format('Релиз {0}', github.ref_name)
+      || format('Проверка ветки {0}', github.ref_name) }}
+
+# Сборка идёт по тегу вида v0.1.0. Ветка сама по себе релиза не даёт: на
+# объекте должно быть понятно, какая именно версия там стоит, а «последний
+# коммит в main» таким ответом не является.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # нужно, чтобы создать релиз и приложить к нему файлы
+
+jobs:
+  test:
+    name: Проверки
+    runs-on: ubuntu-latest
+    steps:
+      - name: Забрать исходники
+        uses: actions/checkout@v5
+      - name: Поставить Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Форматирование
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: Статический анализ
+        run: go vet ./...
+      - name: Тесты с проверкой гонок
+        run: go test -race ./...
+      - name: Синтаксис скриптов
+        run: |
+          sh -n install.sh
+          sh -n deploy/malina/install-on-malina.sh
+          sh -n deploy/malina/agent-ctl.sh
+
+  build:
+    name: Сборка
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            suffix: linux-amd64
+          - goarch: arm
+            goarm: "7"
+            suffix: linux-armv7
+          - goarch: arm64
+            suffix: linux-arm64
+    steps:
+      - name: Забрать исходники
+        uses: actions/checkout@v5
+      - name: Поставить Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Сборка под ${{ matrix.suffix }}
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          # CGO не нужен: SQLite чистый на Go, агент без cgo — кросс-компиляция
+          # статическая, без тулчейна.
+          CGO_ENABLED: "0"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ "$version" = "$GITHUB_REF_NAME" ] && version="$(git rev-parse --short HEAD)"
+          # Центральный демон (мост MicroArt -> MQTT по сети)
+          go build -trimpath -ldflags "-s -w -X main.version=$version" \
+            -o "microart2mqtt-${{ matrix.suffix }}" ./cmd/microart2mqtt
+          # Агент для «Малины» (крутится на устройстве; веб-интерфейс встроен,
+          # умеет самообновление — отсюда его и качает).
+          go build -trimpath -ldflags "-s -w -X main.version=$version" \
+            -o "malina-agent-${{ matrix.suffix }}" ./cmd/malina-agent
+
+      - name: Сохранить бинарники
+        uses: actions/upload-artifact@v5
+        with:
+          name: bins-${{ matrix.suffix }}
+          path: |
+            microart2mqtt-${{ matrix.suffix }}
+            malina-agent-${{ matrix.suffix }}
+          retention-days: 7
+
+  release:
+    name: Публикация
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Забрать исходники с историей
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Тег должен стоять на main
+        # Релиз собирается только из main: на объекте должно быть понятно, что
+        # именно там стоит, а тег с ветки разработки такой гарантии не даёт.
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "Тег $GITHUB_REF_NAME не входит в main — релиз не собираем." >&2
+            exit 1
+          }
+
+      - name: Собрать бинарники всех платформ
+        uses: actions/download-artifact@v5
+        with:
+          merge-multiple: true
+
+      - name: Контрольные суммы
+        # И установщик, и самообновление агента качают бинарник по сети и сверяют
+        # его сумму по этому файлу. Без него это «запустить то, что пришло».
+        run: sha256sum microart2mqtt-* malina-agent-* > SHA256SUMS
+
+      - name: Что вошло в релиз
+        run: |
+          {
+            printf '## %s\n\n' "$GITHUB_REF_NAME"
+            git tag -l --format='%(contents)' "$GITHUB_REF_NAME"
+            printf '\n### Собрано\n\n'
+            printf '| файл | размер | sha256 |\n|---|---:|---|\n'
+            for f in microart2mqtt-* malina-agent-*; do
+              printf '| `%s` | %s | `%s` |\n' \
+                "$f" "$(du -h "$f" | cut -f1)" "$(sha256sum "$f" | cut -c1-16)…"
+            done
+            printf '\n### Установка центрального демона\n\n'
+            printf '```\ncurl -fsSL https://github.com/%s/releases/latest/download/install.sh | sudo sh\n```\n' \
+              "$GITHUB_REPOSITORY"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Описание релиза из сообщения тега
+        run: git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+
+      - name: Опубликовать релиз
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: |
+            microart2mqtt-*
+            malina-agent-*
+            SHA256SUMS
+            install.sh
+            deploy/microart2mqtt.service
+            deploy/mimisetup-microart-tab.js
+            deploy/malina/agent-ctl.sh
+            deploy/malina/install-on-malina.sh
+            tools/malina_bootstrap.py
+          generate_release_notes: true

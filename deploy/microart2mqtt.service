@@ -1,0 +1,36 @@
+[Unit]
+Description=Мост MicroArt -> MQTT
+Documentation=https://github.com/staskuznec/microart2mqtt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Адрес веба и подкаталог подставляет установщик: за прокси это /microart,
+# без прокси — прямой порт.
+ExecStart=/usr/local/bin/microart2mqtt --addr 127.0.0.1:8081 --db /var/lib/microart2mqtt/microart2mqtt.db
+Restart=always
+RestartSec=10s
+
+# Демон пишет в stdout, журналом занимается systemd
+StandardOutput=journal
+StandardError=journal
+
+User=microart
+Group=microart
+
+# Нужны только сеть и свой каталог с базой
+StateDirectory=microart2mqtt
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

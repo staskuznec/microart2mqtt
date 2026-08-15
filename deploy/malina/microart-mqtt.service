@@ -1,0 +1,22 @@
+[Unit]
+Description=MicroArt -> MQTT agent
+Documentation=https://github.com/staskuznec/microart2mqtt
+After=network.target nginx.service
+Wants=network.target
+
+[Service]
+Type=simple
+# systemd на этой прошивке — 215 (jessie): StandardOutput=append: не поддержан,
+# а journald у МикроАрт замаскирован. Поэтому вывод перенаправляем сами, через
+# shell-враппер с exec (процессом остаётся сам агент, а не оболочка).
+# Лог лежит в веб-корне и читается по http://<ip>/mqtt-agent.txt
+ExecStart=/bin/sh -c 'exec /settings/microart-mqtt/malina-agent --config /settings/web-data/mqtt.json >>/settings/html/mqtt-agent.txt 2>&1'
+Restart=always
+RestartSec=10s
+
+# Обновление агента заменяет образ процесса через exec: pid сохраняется, и
+# systemd этого даже не замечает — перезапускать юнит не нужно.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
