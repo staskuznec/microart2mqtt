@@ -30,14 +30,16 @@ MARKER = "# microart2mqtt"
 #
 # Ставим В НАЧАЛО myfolders.sh (сразу после shebang), до вызова my_init.sh:
 # тот может зависнуть или перезагрузиться, и строки после него не выполнятся.
-# Лог установки кладём на /boot — этот раздел FAT виден в macOS, поэтому лог
-# читается на компьютере даже без шелла на устройстве.
+#
+# /boot смонтирован ro — писать туда нельзя. Лог кладём в корень их веб-сервера
+# (/settings/html, раздел на запись): он открывается в браузере по
+# http://<ip>/mqtt-install.txt — видно без шелла и без снятия карты.
+# Установщик читаем с /boot (оттуда чтение работает и на ro).
 BLOCK = (
     MARKER + ": console autologin + agent bootstrap (added offline)\n"
-    "mkdir -p /boot/microart 2>/dev/null\n"
     "setsid /sbin/agetty --autologin pi --noclear tty1 linux >/dev/null 2>&1 &\n"
     "[ -f /boot/microart/install-on-malina.sh ] && "
-    "sh /boot/microart/install-on-malina.sh >/boot/microart/install.log 2>&1 &\n"
+    "sh /boot/microart/install-on-malina.sh >/settings/html/mqtt-install.txt 2>&1 &\n"
 )
 
 
