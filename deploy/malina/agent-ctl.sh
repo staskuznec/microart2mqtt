@@ -21,6 +21,11 @@ LOG=/var/log/malina-agent.log
 PIDFILE=/var/run/malina-agent.pid
 NAME=malina-agent
 
+# Откуда берём новый бинарник при обновлении. URL зашит — веб-кнопка просто
+# запускает update без параметров, ничего вводить не нужно. Собирается этот
+# файл в GitHub Actions (release.yml) под ARMv7.
+UPDATE_URL=https://github.com/staskuznec/microart2mqtt/releases/latest/download/malina-agent-linux-armv7
+
 log() { echo "$(date '+%F %T') agent-ctl: $*"; }
 
 is_running() {
@@ -65,8 +70,7 @@ reload() {
 }
 
 update() {
-    url="${1:-}"
-    [ -n "$url" ] || { log "update: не задан URL"; return 2; }
+    url="${1:-$UPDATE_URL}"   # без аргумента берём зашитый URL релиза
 
     tmp="$(mktemp /tmp/malina-agent.XXXXXX)" || return 1
     sums="$(mktemp /tmp/malina-sums.XXXXXX)" || return 1

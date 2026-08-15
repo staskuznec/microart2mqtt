@@ -46,6 +46,14 @@ func NewMicroArt(option MicroArtOption) (*MicroArt, error) {
 	return &MicroArt{config: option, httpClient: client}, nil
 }
 
+// RawJSON возвращает сырой ответ read_json.php?device=… без разбора в структуры.
+// Нужен агенту на «Малине»: он публикует в MQTT всё, что отдаёт устройство, а
+// не только поля известных моделей. device — map, bat или mppt.
+func (m *MicroArt) RawJSON(device string) ([]byte, error) {
+	url := fmt.Sprintf("%s/read_json.php?device=%s", m.config.BaseURL, device)
+	return m.doRequestWithRetry(url)
+}
+
 func (m *MicroArt) doRequestWithRetry(url string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < m.config.MaxRetries; attempt++ {

@@ -26,9 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Забрать исходники
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Поставить Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -38,8 +38,11 @@ jobs:
         run: go vet ./...
       - name: Тесты с проверкой гонок
         run: go test -race ./...
-      - name: Синтаксис установщика
-        run: sh -n install.sh
+      - name: Синтаксис скриптов
+        run: |
+          sh -n install.sh
+          sh -n deploy/malina/install-on-malina.sh
+          sh -n deploy/malina/agent-ctl.sh
 
   build:
     name: Сборка
@@ -57,9 +60,9 @@ jobs:
             suffix: linux-arm64
     steps:
       - name: Забрать исходники
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Поставить Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -69,21 +72,27 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
-          # SQLite взят чистый на Go, поэтому кросс-компиляция обходится без
-          # тулчейна и собирается статически.
+          # CGO не нужен: SQLite чистый на Go, агент без cgo — кросс-компиляция
+          # статическая, без тулчейна.
           CGO_ENABLED: "0"
         run: |
           version="${GITHUB_REF_NAME#v}"
           [ "$version" = "$GITHUB_REF_NAME" ] && version="$(git rev-parse --short HEAD)"
-          go build -trimpath \
-            -ldflags "-s -w -X main.version=$version" \
+          # Центральный демон (мост MicroArt -> MQTT по сети)
+          go build -trimpath -ldflags "-s -w -X main.version=$version" \
             -o "microart2mqtt-${{ matrix.suffix }}" ./cmd/microart2mqtt
+          # Агент для «Малины» (крутится на устройстве; веб-интерфейс встроен,
+          # умеет самообновление — отсюда его и качает).
+          go build -trimpath -ldflags "-s -w -X main.version=$version" \
+            -o "malina-agent-${{ matrix.suffix }}" ./cmd/malina-agent
 
-      - name: Сохранить бинарник
-        uses: actions/upload-artifact@v4
+      - name: Сохранить бинарники
+        uses: actions/upload-artifact@v5
         with:
-          name: microart2mqtt-${{ matrix.suffix }}
-          path: microart2mqtt-${{ matrix.suffix }}
+          name: bins-${{ matrix.suffix }}
+          path: |
+            microart2mqtt-${{ matrix.suffix }}
+            malina-agent-${{ matrix.suffix }}
           retention-days: 7
 
   release:
@@ -93,7 +102,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Забрать исходники с историей
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -108,15 +117,14 @@ jobs:
           }
 
       - name: Собрать бинарники всех платформ
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           merge-multiple: true
 
       - name: Контрольные суммы
-        # Установщик скачивает бинарник по сети и ставит его в систему. Без
-        # сверки суммы это означало бы «запустить то, что пришло», поэтому
-        # файл сумм обязателен.
-        run: sha256sum microart2mqtt-* > SHA256SUMS
+        # И установщик, и самообновление агента качают бинарник по сети и сверяют
+        # его сумму по этому файлу. Без него это «запустить то, что пришло».
+        run: sha256sum microart2mqtt-* malina-agent-* > SHA256SUMS
 
       - name: Что вошло в релиз
         run: |
@@ -125,20 +133,16 @@ jobs:
             git tag -l --format='%(contents)' "$GITHUB_REF_NAME"
             printf '\n### Собрано\n\n'
             printf '| файл | размер | sha256 |\n|---|---:|---|\n'
-            for f in microart2mqtt-*; do
+            for f in microart2mqtt-* malina-agent-*; do
               printf '| `%s` | %s | `%s` |\n' \
-                "$f" \
-                "$(du -h "$f" | cut -f1)" \
-                "$(sha256sum "$f" | cut -c1-16)…"
+                "$f" "$(du -h "$f" | cut -f1)" "$(sha256sum "$f" | cut -c1-16)…"
             done
-            printf '\n### Установка\n\n'
+            printf '\n### Установка центрального демона\n\n'
             printf '```\ncurl -fsSL https://github.com/%s/releases/latest/download/install.sh | sudo sh\n```\n' \
               "$GITHUB_REPOSITORY"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Описание релиза из сообщения тега
-        # Сообщение тега — это и есть «что и зачем»: оно пишется осознанно, а
-        # автосписок коммитов сам по себе объясняет мало.
         run: git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > RELEASE_NOTES.md
 
       - name: Опубликовать релиз
@@ -147,8 +151,12 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: |
             microart2mqtt-*
+            malina-agent-*
             SHA256SUMS
+            install.sh
             deploy/microart2mqtt.service
             deploy/mimisetup-microart-tab.js
-            install.sh
+            deploy/malina/agent-ctl.sh
+            deploy/malina/install-on-malina.sh
+            tools/malina_bootstrap.py
           generate_release_notes: true

@@ -15,10 +15,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -56,11 +54,30 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// SIGUSR1 — перечитать конфиг (шлёт веб-страница после «Сохранить»).
-	reload := make(chan os.Signal, 1)
-	signal.Notify(reload, syscall.SIGUSR1)
+	// Общий сигнал «применить настройки заново»: его шлют и SIGUSR1, и веб-
+	// страница после сохранения. Буфер 1 + неблокирующая отправка — лишние
+	// триггеры схлопываются.
+	reload := make(chan struct{}, 1)
+	trigger := func() {
+		select {
+		case reload <- struct{}{}:
+		default:
+		}
+	}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGUSR1)
+	go func() {
+		for range sig {
+			trigger()
+		}
+	}()
 
 	ag := &agent{path: *cfgPath, api: *apiURL}
+
+	// Веб-страница агента поднимается один раз на всё время работы. Порт берём
+	// из первого чтения конфига (при смене порта нужен рестарт агента).
+	startCfg, _ := LoadConfig(*cfgPath)
+	ag.startWeb(*cfgPath, startCfg, trigger)
 
 	for {
 		ag.runOnce(ctx, reload)
@@ -69,7 +86,7 @@ func main() {
 			ag.shutdown()
 			return
 		default:
-			// перезапуск по SIGUSR1 — просто следующая итерация цикла
+			// применяем настройки заново — следующая итерация цикла
 		}
 	}
 }
@@ -89,7 +106,7 @@ type agent struct {
 }
 
 // runOnce поднимает подключение и опрашивает до SIGUSR1 или остановки.
-func (a *agent) runOnce(ctx context.Context, reload <-chan os.Signal) {
+func (a *agent) runOnce(ctx context.Context, reload <-chan struct{}) {
 	cfg, err := LoadConfig(a.path)
 	if err != nil {
 		slog.Error("не удалось прочитать конфиг, жду сигнала", "err", err)
@@ -122,12 +139,12 @@ func (a *agent) runOnce(ctx context.Context, reload <-chan os.Signal) {
 	}
 	defer api.Close()
 
-	a.lastValues = make(map[string]string, len(cfg.Metrics))
+	a.lastValues = make(map[string]string, 128)
 	a.lastFull = time.Time{}
 
 	interval := cfg.PollInterval()
 	slog.Info("агент запущен", "broker", cfg.BrokerURL(), "base", cfg.BaseTopic,
-		"interval", interval, "metrics", len(cfg.Metrics))
+		"interval", interval)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -141,7 +158,12 @@ func (a *agent) runOnce(ctx context.Context, reload <-chan os.Signal) {
 			a.setAvailability(offline)
 			return
 		case <-reload:
-			slog.Info("получен SIGUSR1 — перечитываю настройки")
+			slog.Info("применяю настройки заново")
+			// Если новыми настройками агент выключают — пометим offline, пока
+			// соединение живо (чистый disconnect LWT не пришлёт).
+			if ncfg, err := LoadConfig(a.path); err == nil && !ncfg.Enabled {
+				a.setAvailability(offline)
+			}
 			return
 		case <-ticker.C:
 			a.poll(api, cfg)
@@ -149,7 +171,7 @@ func (a *agent) runOnce(ctx context.Context, reload <-chan os.Signal) {
 	}
 }
 
-func (a *agent) waitReload(ctx context.Context, reload <-chan os.Signal, d time.Duration) {
+func (a *agent) waitReload(ctx context.Context, reload <-chan struct{}, d time.Duration) {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
@@ -159,7 +181,11 @@ func (a *agent) waitReload(ctx context.Context, reload <-chan os.Signal, d time.
 	}
 }
 
-// poll делает один цикл: тянет нужные разделы API и публикует изменения.
+// devices — разделы API, которые публикуем целиком.
+var devices = []string{"map", "bat", "mppt"}
+
+// poll делает один цикл: тянет сырой JSON каждого раздела и публикует ВСЕ поля.
+// Ничего описывать не надо — что устройство отдаёт, то и уходит в топики.
 func (a *agent) poll(api *microart.MicroArt, cfg Config) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -167,120 +193,95 @@ func (a *agent) poll(api *microart.MicroArt, cfg Config) {
 		}
 	}()
 
-	var needMap, needBat, needMPPT bool
-	for _, m := range cfg.Metrics {
-		switch m.Device {
-		case "map":
-			needMap = true
-		case "bat":
-			needBat = true
-		case "mppt":
-			needMPPT = true
-		}
-	}
+	// topic -> строковое значение за этот цикл.
+	values := make(map[string]string, 128)
+	// раздельные сырые JSON для топиков <base>/<device>.
+	rawByDevice := make(map[string]string, len(devices))
+	reached := false // хоть один раздел ответил
 
-	var mapResp *microart.MapResponse
-	var batResp *microart.BatteryResponse
-	var mpptResp *microart.MPPTResponse
-	var err error
-
-	if needMap {
-		if mapResp, err = api.GetDeviceInfo(); err != nil {
-			a.setAvailability(offline)
-			slog.Warn("read_json map не ответил", "err", err)
-			return
-		}
-	}
-	if needBat {
-		if b, e := api.GetBatteryInfo(); e != nil {
-			a.setAvailability(offline)
-			slog.Warn("read_json bat не ответил", "err", e)
-			return
-		} else {
-			batResp = &b
-		}
-	}
-	if needMPPT {
-		if mpptResp, err = api.GetMpptInfo(); err != nil {
-			slog.Debug("read_json mppt не ответил (нет контроллеров?)", "err", err)
-		}
-	}
-
-	values := make(map[string]any, len(cfg.Metrics))
-	raw := make(map[string]string, len(cfg.Metrics))
-	for _, m := range cfg.Metrics {
-		var src any
-		switch m.Device {
-		case "map":
-			if mapResp != nil {
-				src = mapResp
+	for _, dev := range devices {
+		raw, err := api.RawJSON(dev)
+		if err != nil {
+			// map/bat обязательны, mppt может отсутствовать — не шумим по нему.
+			if dev != "mppt" {
+				slog.Warn("read_json не ответил", "device", dev, "err", err)
 			}
-		case "bat":
-			if batResp != nil {
-				src = *batResp
-			}
-		case "mppt":
-			if mpptResp != nil {
-				src = mpptResp
-			}
-		}
-		if src == nil {
 			continue
 		}
-		s, err := microart.FieldFrom(src, m.Target)
-		if err != nil || strings.TrimSpace(s) == "" {
+		var tree any
+		if err := json.Unmarshal(raw, &tree); err != nil {
+			slog.Debug("не разобрать JSON раздела", "device", dev, "err", err)
 			continue
 		}
-		val, text := convert(m, s)
-		values[m.Name] = val
-		raw[m.Name] = text
+		fields, err := microart.Fields(tree)
+		if err != nil || len(fields) == 0 {
+			continue
+		}
+		reached = true
+		rawByDevice[dev] = strings.TrimSpace(string(raw))
+		for _, f := range fields {
+			topic := dev + "/" + topicPath(f.Path)
+			values[topic] = f.Value
+		}
 	}
-	if len(values) == 0 {
+
+	if !reached {
 		a.setAvailability(offline)
 		return
 	}
-
 	a.setAvailability(online)
-	a.publish(cfg, values, raw)
+	a.publish(cfg, values, rawByDevice)
 }
 
-// publish отправляет изменившиеся значения; раз в republish — весь набор.
-func (a *agent) publish(cfg Config, values map[string]any, raw map[string]string) {
+// publish шлёт изменившиеся значения; раз в republish — весь набор заново.
+func (a *agent) publish(cfg Config, values map[string]string, rawByDevice map[string]string) {
 	full := cfg.RepublishInterval() <= 0 || a.lastFull.IsZero() ||
 		time.Since(a.lastFull) >= cfg.RepublishInterval()
 
 	changed, failed := 0, 0
-	for _, m := range cfg.Metrics {
-		text, ok := raw[m.Name]
-		if !ok {
+	for topic, text := range values {
+		if !full && a.lastValues[topic] == text {
 			continue
 		}
-		if !full && a.lastValues[m.Name] == text {
-			continue
-		}
-		if a.pub(a.base+"/"+m.FlatTopic(), text, a.retain) {
-			a.lastValues[m.Name] = text
+		if a.pub(a.base+"/"+topic, text, a.retain) {
+			a.lastValues[topic] = text
 			changed++
 		} else {
-			delete(a.lastValues, m.Name)
+			delete(a.lastValues, topic)
 			failed++
 		}
 	}
 
-	if changed > 0 || full {
-		values["ts"] = time.Now().Format(time.RFC3339)
-		if data := toJSON(values); data != nil {
-			if !a.pub(a.base+"/state", data, a.retain) {
+	// Заодно кладём сырой JSON каждого раздела целиком — удобно тем, кто хочет
+	// разобрать сам. Только при полном цикле, чтобы не гонять большие пейлоады.
+	if full {
+		for dev, raw := range rawByDevice {
+			if !a.pub(a.base+"/"+dev, raw, a.retain) {
 				failed++
 			}
 		}
 	}
+
 	if failed > 0 {
 		a.lastFull = time.Time{}
 	} else if full {
 		a.lastFull = time.Now()
 	}
-	slog.Debug("опубликовано", "changed", changed, "full", full)
+	slog.Debug("опубликовано", "changed", changed, "full", full, "known", len(a.lastValues))
+}
+
+// topicPath превращает путь поля API в хвост топика: точки -> слэши, а
+// недопустимые в топиках символы (+ # пробел) заменяем на «_».
+func topicPath(p string) string {
+	p = strings.ReplaceAll(p, ".", "/")
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '+', '#', ' ', '\t':
+			return '_'
+		default:
+			return r
+		}
+	}, p)
 }
 
 // --- MQTT ---
@@ -365,30 +366,4 @@ func clientID(configured string) string {
 		return "malina-agent"
 	}
 	return "malina-agent-" + h
-}
-
-// toJSON сериализует стейт; при ошибке возвращает nil (публикацию пропустим).
-func toJSON(v any) []byte {
-	b, err := json.Marshal(v)
-	if err != nil {
-		slog.Error("не удалось собрать JSON стейта", "err", err)
-		return nil
-	}
-	return b
-}
-
-// convert приводит значение к числу или строке по настройке метрики.
-func convert(m Metric, s string) (any, string) {
-	if !m.IsNumber() {
-		return s, s
-	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return s, s
-	}
-	if m.Precision != nil {
-		p := math.Pow10(*m.Precision)
-		f = math.Round(f*p) / p
-	}
-	return f, strconv.FormatFloat(f, 'f', -1, 64)
 }

@@ -10,29 +10,23 @@ import (
 
 // Config — настройки агента. Живёт файлом /settings/web-data/mqtt.json на
 // записываемом разделе «Малины»; его пишет страница «MQTT» в их вебморде, а
-// агент перечитывает по SIGUSR1. Формат намеренно плоский — это одна форма.
+// агент перечитывает по SIGUSR1.
+//
+// Метрик здесь нет намеренно: агент публикует ВСЁ, что отдаёт API малины —
+// каждое поле становится топиком автоматически. Описывать ничего не нужно,
+// как у zigbee2mqtt/tasmota; подписчик берёт то, что ему интересно.
 type Config struct {
-	Enabled   bool     `json:"enabled"`
-	Broker    string   `json:"broker"` // host:port, tcp://…, tls://…
-	Username  string   `json:"username"`
-	Password  string   `json:"password"`
-	ClientID  string   `json:"client_id"`  // пусто -> из имени хоста
-	BaseTopic string   `json:"base_topic"` // например microart/inv1
-	QoS       int      `json:"qos"`
-	Retain    bool     `json:"retain"`
-	Interval  int      `json:"interval_sec"`  // как часто опрашивать localhost
-	Republish int      `json:"republish_sec"` // как часто слать всё заново
-	Metrics   []Metric `json:"metrics"`
-}
-
-// Metric — одно значение: откуда взять и в какой топик писать.
-type Metric struct {
-	Name      string `json:"name"`      // ключ в JSON-стейте
-	Topic     string `json:"topic"`     // хвост топика; пусто -> = name
-	Device    string `json:"device"`    // map | bat | mppt
-	Target    string `json:"target"`    // путь в ответе API
-	Kind      string `json:"kind"`      // number | string
-	Precision *int   `json:"precision"` // округление; null -> как есть
+	Enabled   bool   `json:"enabled"`
+	Broker    string `json:"broker"` // host:port, tcp://…, tls://…
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	ClientID  string `json:"client_id"`  // пусто -> из имени хоста
+	BaseTopic string `json:"base_topic"` // например microart/inv1
+	QoS       int    `json:"qos"`
+	Retain    bool   `json:"retain"`
+	Interval  int    `json:"interval_sec"`  // как часто опрашивать localhost
+	Republish int    `json:"republish_sec"` // как часто слать всё заново
+	WebPort   int    `json:"web_port"`      // порт веб-страницы агента
 }
 
 const (
@@ -40,18 +34,8 @@ const (
 	defaultRepublish = 10 * time.Minute
 	defaultBaseTopic = "microart/inv1"
 	minInterval      = 1 * time.Second
+	defaultWebPort   = 8091
 )
-
-// FlatTopic возвращает хвост топика метрики.
-func (m Metric) FlatTopic() string {
-	if t := strings.Trim(strings.TrimSpace(m.Topic), "/"); t != "" {
-		return t
-	}
-	return m.Name
-}
-
-// IsNumber сообщает, публиковать ли значение числом.
-func (m Metric) IsNumber() bool { return m.Kind != "string" }
 
 // PollInterval — интервал опроса с нижней границей.
 func (c Config) PollInterval() time.Duration {
@@ -91,7 +75,7 @@ func (c Config) BrokerURL() string {
 	return "tcp://" + a
 }
 
-// LoadConfig читает и проверяет файл настроек.
+// LoadConfig читает и подставляет значения по умолчанию.
 func LoadConfig(path string) (Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -108,24 +92,44 @@ func LoadConfig(path string) (Config, error) {
 	if c.QoS < 0 || c.QoS > 2 {
 		c.QoS = 0
 	}
-	if len(c.Metrics) == 0 {
-		c.Metrics = DefaultMetrics()
+	if c.WebPort <= 0 {
+		c.WebPort = defaultWebPort
 	}
 	return c, nil
 }
 
-// DefaultMetrics — набор по умолчанию, если в конфиге метрик нет.
-// Те же поля, что у центрального демона: заряд, ток, сеть, нагрузка, солнце.
-func DefaultMetrics() []Metric {
-	p := func(n int) *int { return &n }
-	return []Metric{
-		{Name: "soc", Topic: "battery/soc", Device: "bat", Target: "minute_data.C_100_remain", Precision: p(1)},
-		{Name: "battery_voltage", Topic: "battery/voltage", Device: "bat", Target: "minute_data.Uacc_avg", Precision: p(2)},
-		{Name: "battery_current", Topic: "battery/current", Device: "bat", Target: "minute_data.Iavg", Precision: p(2)},
-		{Name: "grid_voltage", Topic: "grid/voltage", Device: "map", Target: "_UNET", Precision: p(1)},
-		{Name: "grid_power", Topic: "grid/power", Device: "map", Target: "_PNET", Precision: p(1)},
-		{Name: "load_power", Topic: "load/power", Device: "map", Target: "_PLoad", Precision: p(1)},
-		{Name: "solar_power", Topic: "solar/power", Device: "bat", Target: "second_data.Sun_P", Precision: p(1)},
-		{Name: "status", Topic: "status", Device: "map", Target: "_Status_Char"},
+// WebAddr — адрес, на котором агент слушает свою веб-страницу.
+func (c Config) WebAddr() string {
+	port := c.WebPort
+	if port <= 0 {
+		port = defaultWebPort
 	}
+	return fmt.Sprintf(":%d", port)
+}
+
+// Save записывает конфиг в файл (агент правит его сам из веб-страницы).
+func (c Config) Save(path string) error {
+	c.BaseTopic = strings.Trim(strings.TrimSpace(c.BaseTopic), "/")
+	if c.BaseTopic == "" {
+		c.BaseTopic = defaultBaseTopic
+	}
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	if dir := dirOf(path); dir != "" {
+		_ = os.MkdirAll(dir, 0o775)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o664); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func dirOf(path string) string {
+	if i := strings.LastIndexByte(path, '/'); i > 0 {
+		return path[:i]
+	}
+	return ""
 }
