@@ -27,11 +27,17 @@ HOOK = "/usr/sbin/myfolders.sh"
 MARKER = "# microart2mqtt"
 # Вставляемый текст — только ASCII: файл образа кодируется побайтно (latin-1),
 # а шеллу комментарий на латинице роли не играет.
+#
+# Ставим В НАЧАЛО myfolders.sh (сразу после shebang), до вызова my_init.sh:
+# тот может зависнуть или перезагрузиться, и строки после него не выполнятся.
+# Лог установки кладём на /boot — этот раздел FAT виден в macOS, поэтому лог
+# читается на компьютере даже без шелла на устройстве.
 BLOCK = (
-    "\n" + MARKER + ": console autologin + agent bootstrap (added offline)\n"
+    MARKER + ": console autologin + agent bootstrap (added offline)\n"
+    "mkdir -p /boot/microart 2>/dev/null\n"
     "setsid /sbin/agetty --autologin pi --noclear tty1 linux >/dev/null 2>&1 &\n"
     "[ -f /boot/microart/install-on-malina.sh ] && "
-    "sh /boot/microart/install-on-malina.sh >/var/log/microart-install.log 2>&1 &\n"
+    "sh /boot/microart/install-on-malina.sh >/boot/microart/install.log 2>&1 &\n"
 )
 
 
@@ -53,13 +59,23 @@ def main():
     d = fs.inode(ino)
     content = fs.read_file(ino).decode("latin-1")
 
-    if MARKER in content:
-        print("Уже прописано — образ готов.")
-        return
+    # Убираем наши прежние строки (любой версии), чтобы вставить свежие и не
+    # накапливать дубли. Опознаём по характерным подстрокам.
+    sig = ("# microart2mqtt", "agetty --autologin pi", "install-on-malina.sh",
+           "mkdir -p /boot/microart")
+    kept = [ln for ln in content.split("\n") if not any(s in ln for s in sig)]
+    cleaned = "\n".join(kept)
 
-    idx = content.rfind("exit 0")
-    new = content[:idx] + BLOCK + content[idx:] if idx >= 0 else content + BLOCK
+    # Вставляем сразу после строки shebang (#!/bin/sh), до всей логики.
+    nl = cleaned.find("\n")
+    if nl < 0:
+        raise SystemExit("в %s нет переносов строк — неожиданный формат" % HOOK)
+    new = cleaned[:nl + 1] + BLOCK + cleaned[nl + 1:]
     data = new.encode("latin-1")
+
+    if new == content:
+        print("Уже прописано в актуальном виде — образ готов.")
+        return
 
     blocks = fs.extents(d)
     if len(blocks) != 1:
@@ -71,7 +87,7 @@ def main():
     print("Файл:", HOOK)
     print("Размер: %d -> %d байт (запас в блоке: %d)" %
           (len(content), len(data), fs.block_size - len(data)))
-    print("Вставка перед 'exit 0':")
+    print("Вставка в начало myfolders.sh (после shebang):")
     for line in BLOCK.strip("\n").split("\n"):
         print("   ", line)
 

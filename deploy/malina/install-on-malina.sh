@@ -55,15 +55,21 @@ JSON
     say "создан $CFG (агент выключен — задайте брокер в вебе)"
 fi
 
-# --- пункт меню в веб-морде (load_menu.php тоже на /settings, запись есть) ---
-if [ -f "$MENU" ] && ! grep -q "mqtt.php" "$MENU"; then
-    cp "$MENU" "$MENU.before-mqtt"
-    if grep -q "cloud.php" "$MENU"; then
-        sed 's#\(.*cloud\.php.*\)#\1\n<li><a href="mqtt.php"><span class="glyphicons glyphicons-cloud-upload"></span> MQTT</a></li>#' \
-            "$MENU.before-mqtt" > "$MENU" 2>/dev/null || cp "$MENU.before-mqtt" "$MENU"
-        say "пункт меню MQTT добавлен"
+# --- кнопка MQTT в навбар веб-морды (меню — в index.php, тоже на /settings) --
+IDX="$WEB/index.php"
+ITEM='                    <li role="presentation" class="normal"><a href="mqtt.php"><span class="glyphicon glyphicon-cloud-upload" aria-hidden="true"></span>&nbsp;MQTT</a></li>'
+if [ -f "$IDX" ] && ! grep -q 'href="mqtt.php"' "$IDX"; then
+    cp "$IDX" "$IDX.before-mqtt"
+    # Вставляем пункт первым в списке — сразу после <ul class="nav nav-pills">.
+    awk -v item="$ITEM" '
+        {print}
+        /<ul class="nav nav-pills">/ && !done {print item; done=1}
+    ' "$IDX.before-mqtt" > "$IDX" 2>/dev/null
+    if grep -q 'href="mqtt.php"' "$IDX"; then
+        say "кнопка MQTT добавлена в меню"
     else
-        say "ориентир в меню не найден — добавьте ссылку mqtt.php вручную"
+        cp "$IDX.before-mqtt" "$IDX"
+        say "не удалось добавить кнопку в меню (разметка иная) — откатил index.php"
     fi
 fi
 
