@@ -61,12 +61,13 @@ microart/inv1/availability         online | offline
 make image IMAGE=путь/к/образу.img
 ```
 
-Дальше карта:
+Исходный образ не меняется — правки идут в копию `..._mqtt-mod.img`, её и пишем
+на карту:
 
 ```sh
 diskutil list external physical           # найти карту (сверьте размер!)
 diskutil unmountDisk /dev/diskN
-sudo dd if=путь/к/образу.img of=/dev/rdiskN bs=4m
+sudo dd if=путь/к/образу_mqtt-mod.img of=/dev/rdiskN bs=4m
 sudo diskutil eject /dev/diskN
 ```
 

@@ -28,17 +28,26 @@ agent-armv7:
 	$(ARM) go build -ldflags "$(LDFLAGS)" -o ./exe/microart-boot/malina-agent ./cmd/malina-agent
 
 # Готовый к прошивке образ: вписывает автозапуск и кладёт бандл агента прямо в
-# /boot образа. После dd на карту копировать руками уже ничего не нужно.
-# Свой образ указывается так: make image IMAGE=docs/другой.img
+# /boot. После dd на карту копировать руками уже ничего не нужно.
+#
+# Работаем НЕ с исходным образом, а с копией *_mqtt-mod.img: исходник остаётся
+# нетронутым, всегда есть к чему вернуться. Копия делается один раз, дальше
+# правки накатываются на неё повторно (обе операции идемпотентны).
+# Свой образ: make image IMAGE=docs/другой.img
 IMAGE ?= docs/malina2_5.08_u43_everything_shrunk.img
+IMAGE_OUT = $(basename $(IMAGE))_mqtt-mod$(suffix $(IMAGE))
 image: agent-armv7
-	python3 tools/malina_bootstrap.py $(IMAGE) --apply
-	python3 tools/fat_put.py $(IMAGE) MICROART \
+	@[ -f "$(IMAGE_OUT)" ] || { echo "копирую $(IMAGE) -> $(IMAGE_OUT) (4.6 ГБ, разово)"; \
+		cp "$(IMAGE)" "$(IMAGE_OUT)"; }
+	python3 tools/malina_bootstrap.py $(IMAGE_OUT) --apply
+	python3 tools/fat_put.py $(IMAGE_OUT) MICROART \
 		./exe/microart-boot/malina-agent=AGENT \
 		deploy/malina/agent-ctl.sh=AGENTCTL.SH \
 		deploy/malina/install-on-malina.sh=INSTALL.SH \
 		deploy/malina/microart-mqtt.service=AGENT.SRV
-	@echo "Образ готов: $(IMAGE) — можно писать на карту (dd)."
+	@echo ""
+	@echo "Образ готов: $(IMAGE_OUT)"
+	@echo "Писать на карту:  sudo dd if=$(IMAGE_OUT) of=/dev/rdiskN bs=4m"
 
 # Локальный запуск: база кладётся в ./exe, веб на 8081.
 run: build

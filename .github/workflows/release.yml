@@ -158,5 +158,6 @@ jobs:
             deploy/mimisetup-microart-tab.js
             deploy/malina/agent-ctl.sh
             deploy/malina/install-on-malina.sh
+            deploy/malina/microart-mqtt.service
             tools/malina_bootstrap.py
           generate_release_notes: true
