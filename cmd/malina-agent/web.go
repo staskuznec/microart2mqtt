@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // webServer поднимает веб-страницу агента. Вся вёрстка — здесь, в самом
@@ -15,7 +16,8 @@ type webServer struct {
 	cfgPath string
 	status  func() (connected bool, base string)
 	reload  func()       // применить настройки заново (перезапуск опроса)
-	update  func() error // самообновление; при успехе процесс перезапускается
+	update  func() error // скачать и поставить новую версию (без перезапуска)
+	restart func()       // перезапустить процесс новым бинарником
 }
 
 func (a *agent) startWeb(cfgPath string, cfg Config, reload func()) {
@@ -24,6 +26,7 @@ func (a *agent) startWeb(cfgPath string, cfg Config, reload func()) {
 		status:  a.webStatus,
 		reload:  reload,
 		update:  a.selfUpdate,
+		restart: a.restartSelf,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", ws.index)
@@ -126,13 +129,20 @@ func (ws *webServer) doUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "./", http.StatusSeeOther)
 		return
 	}
-	// selfUpdate при успехе перезапускает процесс и не возвращается.
-	// Показываем страницу заранее, чтобы браузер не завис в ожидании.
 	if err := ws.update(); err != nil {
 		redirect(w, r, "", "обновление не удалось: "+err.Error())
 		return
 	}
-	redirect(w, r, "Обновление применяется, агент перезапускается…", "")
+
+	// Бинарник заменён. Перезапуск откладываем: если сделать его прямо здесь,
+	// текущий запрос оборвётся без ответа, а nginx «Малины» покажет на такой
+	// обрыв свою страницу 404 (у них error_page 502 -> /404.html) — человек
+	// решит, что обновление провалилось, хотя оно прошло.
+	redirect(w, r, "Обновлено. Агент перезапускается — обновите страницу через несколько секунд", "")
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		ws.restart()
+	}()
 }
 
 func redirect(w http.ResponseWriter, r *http.Request, ok, errMsg string) {

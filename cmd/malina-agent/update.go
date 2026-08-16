@@ -25,10 +25,11 @@ const (
 	updateName = "malina-agent-linux-armv7"
 )
 
-// selfUpdate скачивает новый бинарник, сверяет контрольную сумму, проверяет,
-// что он запускается, заменяет текущий файл и перезапускает процесс тем же
-// путём (exec). Вся вёрстка внутри бинарника, поэтому веб обновляется вместе с
-// агентом. При успехе функция НЕ возвращается — процесс заменяется.
+// selfUpdate скачивает новый бинарник, сверяет сумму, проверяет запуск и
+// заменяет текущий файл. Процесс при этом НЕ перезапускается — это отдельный
+// шаг (restartSelf), потому что перезапуск обрывает текущий HTTP-запрос:
+// браузер получал бы пустой ответ, а nginx на «Малине» рисует на такой обрыв
+// свою страницу «404», хотя обновление на самом деле прошло.
 func (a *agent) selfUpdate() error {
 	self, err := os.Executable()
 	if err != nil {
@@ -77,13 +78,30 @@ func (a *agent) selfUpdate() error {
 	}
 	_ = os.Chmod(self, 0o755)
 
-	slog.Info("самообновление: перезапускаюсь", "path", self)
-	// Заменяем образ процесса новым бинарником. pid сохраняется — pidfile от
-	// start-stop-daemon остаётся валидным.
-	if err := syscall.Exec(self, os.Args, os.Environ()); err != nil {
-		return fmt.Errorf("перезапуск: %w", err)
+	slog.Info("самообновление: новая версия установлена, готов к перезапуску", "path", self)
+	return nil
+}
+
+// restartSelf заменяет образ процесса новым бинарником. Вызывается уже ПОСЛЕ
+// того, как ответ ушёл в браузер, с небольшой задержкой — иначе запрос
+// оборвётся на полуслове.
+//
+// pid при exec сохраняется, поэтому systemd перезапуска даже не замечает.
+func (a *agent) restartSelf() {
+	self, err := os.Executable()
+	if err != nil {
+		slog.Error("самообновление: не определить свой путь", "err", err)
+		return
 	}
-	return nil // не достигается
+	self, _ = filepath.EvalSymlinks(self)
+
+	slog.Info("самообновление: перезапускаюсь", "path", self)
+	if err := syscall.Exec(self, os.Args, os.Environ()); err != nil {
+		// Не вышло — не страшно: под systemd с Restart=always нас поднимут
+		// заново после выхода.
+		slog.Error("самообновление: exec не удался, выхожу для рестарта службой", "err", err)
+		os.Exit(0)
+	}
 }
 
 func download(c *http.Client, url string) ([]byte, error) {
