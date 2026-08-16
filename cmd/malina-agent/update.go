@@ -31,11 +31,14 @@ const (
 // браузер получал бы пустой ответ, а nginx на «Малине» рисует на такой обрыв
 // свою страницу «404», хотя обновление на самом деле прошло.
 func (a *agent) selfUpdate() error {
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("не определить свой путь: %w", err)
+	// Путь берём тот, что запомнили при старте. Спрашивать os.Executable()
+	// здесь нельзя: он читает /proc/self/exe — ссылку на ИНОД работающего
+	// файла, а мы этот файл ниже переименовываем в .old. После переименования
+	// он вернул бы путь к .old, и перезапуск поднял бы старую версию.
+	self := a.selfPath
+	if self == "" {
+		return fmt.Errorf("не определить свой путь")
 	}
-	self, _ = filepath.EvalSymlinks(self)
 	dir := filepath.Dir(self)
 
 	client := &http.Client{Timeout: 60 * time.Second}
@@ -88,12 +91,11 @@ func (a *agent) selfUpdate() error {
 //
 // pid при exec сохраняется, поэтому systemd перезапуска даже не замечает.
 func (a *agent) restartSelf() {
-	self, err := os.Executable()
-	if err != nil {
-		slog.Error("самообновление: не определить свой путь", "err", err)
+	self := a.selfPath
+	if self == "" {
+		slog.Error("самообновление: не определить свой путь")
 		return
 	}
-	self, _ = filepath.EvalSymlinks(self)
 
 	slog.Info("самообновление: перезапускаюсь", "path", self)
 	if err := syscall.Exec(self, os.Args, os.Environ()); err != nil {

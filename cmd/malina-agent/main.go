@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -73,7 +74,7 @@ func main() {
 		}
 	}()
 
-	ag := &agent{path: *cfgPath, api: *apiURL}
+	ag := &agent{path: *cfgPath, api: *apiURL, selfPath: selfPath()}
 
 	// Проверка новых версий: раз в сутки спрашиваем GitHub и показываем на
 	// странице, что вышло обновление. Ставить сами ничего не будем — решение
@@ -98,11 +99,29 @@ func main() {
 	}
 }
 
+// selfPath возвращает путь к своему бинарнику. Вызывается один раз на старте,
+// пока файл ещё не переименован обновлением.
+func selfPath() string {
+	p, err := os.Executable()
+	if err != nil {
+		slog.Error("не определить путь к своему бинарнику", "err", err)
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
+}
+
 // agent держит одно подключение к брокеру и цикл опроса.
 type agent struct {
 	path    string
 	api     string
 	updates *update.Checker
+	// selfPath — путь к своему бинарнику, определённый ПРИ СТАРТЕ. Обновление
+	// переименовывает работающий файл, после чего os.Executable() указывал бы
+	// уже на .old — поэтому запоминаем заранее и пользуемся только этим.
+	selfPath string
 
 	mu         sync.Mutex
 	client     mqtt.Client
