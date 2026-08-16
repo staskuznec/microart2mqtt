@@ -227,3 +227,10 @@ git push origin v0.1.0
 
 - [TOPICS.md](TOPICS.md) — описание топиков и примеры подписки
 - [МикроАрт](https://invertor.ru) — производитель инверторов МАП и «Малины»
+
+## Контакты
+
+Вопросы, замечания, багрепорты:
+
+- Telegram — [@skut48](https://t.me/skut48)
+- Почта — [stas@kuznec.team](mailto:stas@kuznec.team)
