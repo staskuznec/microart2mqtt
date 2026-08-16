@@ -132,3 +132,14 @@ func sumFor(sums []byte, name string) string {
 	}
 	return ""
 }
+
+// latestVersion сообщает версию из релиза, если она новее установленной.
+// Проверку ведёт фоновый Checker (раз в сутки); сами ничего не ставим —
+// решение за человеком.
+func (a *agent) latestVersion() (string, bool) {
+	if a.updates == nil {
+		return "", false
+	}
+	info := a.updates.Info()
+	return info.Latest, info.HasUpdate
+}

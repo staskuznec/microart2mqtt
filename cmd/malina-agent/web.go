@@ -18,6 +18,8 @@ type webServer struct {
 	reload  func()       // применить настройки заново (перезапуск опроса)
 	update  func() error // скачать и поставить новую версию (без перезапуска)
 	restart func()       // перезапустить процесс новым бинарником
+	// latest — что известно про доступную версию; nil, если проверка выключена.
+	latest func() (version string, has bool)
 }
 
 func (a *agent) startWeb(cfgPath string, cfg Config, reload func()) {
@@ -27,6 +29,7 @@ func (a *agent) startWeb(cfgPath string, cfg Config, reload func()) {
 		reload:  reload,
 		update:  a.selfUpdate,
 		restart: a.restartSelf,
+		latest:  a.latestVersion,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", ws.index)
@@ -70,12 +73,20 @@ func (ws *webServer) index(w http.ResponseWriter, r *http.Request) {
 	cfg, _ := LoadConfig(ws.cfgPath)
 	connected, base := ws.status()
 
+	newVersion := ""
+	if ws.latest != nil {
+		if v, has := ws.latest(); has {
+			newVersion = v
+		}
+	}
+
 	data := pageData{
 		Config:     cfg,
 		Connected:  connected,
 		Base:       base,
 		Version:    version,
 		MalinaBase: malinaBase(r),
+		NewVersion: newVersion,
 		Notice:     r.URL.Query().Get("ok"),
 		Error:      r.URL.Query().Get("err"),
 	}
@@ -184,6 +195,7 @@ type pageData struct {
 	Base       string
 	Version    string
 	MalinaBase string // http://<хост> без порта — на веб-морду малины (:80)
+	NewVersion string // версия в релизе, если она новее установленной
 	Notice     string
 	Error      string
 }
@@ -260,6 +272,7 @@ body{padding-top:64px}
       {{else}}<span class="label label-warning">нет связи с брокером</span>{{end}}
     {{else}}<span class="label label-default">выключен</span>{{end}}
     <span class="text-muted mq-mono">v{{.Version}}</span>
+    {{if .NewVersion}}<span class="label label-info">доступна v{{.NewVersion}}</span>{{end}}
     <span style="flex:1"></span>
     <form method="post" action="toggle" style="margin:0">
       <button class="btn btn-default btn-sm">{{if .Config.Enabled}}Выключить{{else}}Включить{{end}}</button>
@@ -322,8 +335,13 @@ body{padding-top:64px}
 <div class="panel panel-default">
   <div class="panel-heading">Обновление агента</div>
   <div class="panel-body">
+    {{if .NewVersion}}
+      <p>Установлена <b>v{{.Version}}</b>, в релизе — <b>v{{.NewVersion}}</b>.</p>
+    {{else}}
+      <p class="text-muted">Установлена последняя известная версия (v{{.Version}}).</p>
+    {{end}}
     <form method="post" action="update" style="margin:0">
-      <button class="btn btn-default" type="submit">Обновить до последней версии</button>
+      <button class="btn {{if .NewVersion}}btn-primary{{else}}btn-default{{end}}" type="submit">Обновить до последней версии</button>
       <span class="text-muted">&nbsp;Скачает с GitHub, проверит и перезапустится. Веб-страница входит в бинарник — обновится вместе с ним.</span>
     </form>
   </div>

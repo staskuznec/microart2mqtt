@@ -25,6 +25,7 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/staskuznec/microart2mqtt/internal/microart"
+	"github.com/staskuznec/microart2mqtt/internal/update"
 )
 
 var version = "dev"
@@ -74,6 +75,12 @@ func main() {
 
 	ag := &agent{path: *cfgPath, api: *apiURL}
 
+	// Проверка новых версий: раз в сутки спрашиваем GitHub и показываем на
+	// странице, что вышло обновление. Ставить сами ничего не будем — решение
+	// за человеком, устройство не должно менять свой бинарник без спроса.
+	ag.updates = update.New(version, slog.Default())
+	go ag.updates.Run(ctx)
+
 	// Веб-страница агента поднимается один раз на всё время работы. Порт берём
 	// из первого чтения конфига (при смене порта нужен рестарт агента).
 	startCfg, _ := LoadConfig(*cfgPath)
@@ -93,8 +100,9 @@ func main() {
 
 // agent держит одно подключение к брокеру и цикл опроса.
 type agent struct {
-	path string
-	api  string
+	path    string
+	api     string
+	updates *update.Checker
 
 	mu         sync.Mutex
 	client     mqtt.Client
