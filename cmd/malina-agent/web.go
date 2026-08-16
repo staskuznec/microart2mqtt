@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"html/template"
 	"log/slog"
 	"net"
@@ -20,6 +21,8 @@ type webServer struct {
 	restart func()       // перезапустить процесс новым бинарником
 	// latest — что известно про доступную версию; nil, если проверка выключена.
 	latest func() (version string, has bool)
+	// refresh — переспросить GitHub, если ответ залежался.
+	refresh func(context.Context)
 }
 
 func (a *agent) startWeb(cfgPath string, cfg Config, reload func()) {
@@ -30,6 +33,7 @@ func (a *agent) startWeb(cfgPath string, cfg Config, reload func()) {
 		update:  a.selfUpdate,
 		restart: a.restartSelf,
 		latest:  a.latestVersion,
+		refresh: a.refreshLatest,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", ws.index)
@@ -72,6 +76,16 @@ func (ws *webServer) index(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, _ := LoadConfig(ws.cfgPath)
 	connected, base := ws.status()
+
+	// Освежаем сведения о релизе при заходе: фоновая проверка идёт раз в
+	// несколько часов, и без этого страница показывала бы устаревший ответ.
+	// Ждём недолго — на устройстве без интернета страница не должна замирать;
+	// не успели, покажем что знали (и повторим не раньше, чем через freshFor).
+	if ws.refresh != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		ws.refresh(ctx)
+		cancel()
+	}
 
 	newVersion := ""
 	if ws.latest != nil {

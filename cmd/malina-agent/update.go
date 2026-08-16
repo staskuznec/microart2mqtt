@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -137,6 +138,16 @@ func sumFor(sums []byte, name string) string {
 		}
 	}
 	return ""
+}
+
+// refreshLatest переспрашивает GitHub, если прежний ответ устарел. Вызывается
+// при заходе на страницу — с коротким сроком, чтобы не подвешивать её на
+// устройстве без интернета.
+func (a *agent) refreshLatest(ctx context.Context) {
+	if a.updates == nil {
+		return
+	}
+	a.updates.EnsureFresh(ctx)
 }
 
 // latestVersion сообщает версию из релиза, если она новее установленной.

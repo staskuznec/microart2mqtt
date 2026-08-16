@@ -155,7 +155,6 @@ jobs:
             SHA256SUMS
             install.sh
             deploy/microart2mqtt.service
-            deploy/mimisetup-microart-tab.js
             deploy/malina/agent-ctl.sh
             deploy/malina/install-on-malina.sh
             deploy/malina/microart-mqtt.service

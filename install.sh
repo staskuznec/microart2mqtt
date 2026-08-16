@@ -20,16 +20,15 @@ STATE_DIR="${STATE_DIR:-/var/lib/microart2mqtt}"
 SERVICE="microart2mqtt"
 ADDR="${ADDR:-}"
 
-# Корень веб-сервера, где лежит панель умного дома, и подкаталог, в котором
-# рядом с ней встанет демон. Панель обычно в <корень>/MimiSetup — по ней корень
-# и опознаётся.
+# Корень веб-сервера и подкаталог, в котором рядом с существующим сайтом
+# встанет демон. Если каталог не угадан, задайте WEB_ROOT= в окружении.
 WEB_ROOT="${WEB_ROOT:-}"
 BASE_PATH="${BASE_PATH:-/microart}"
 
 find_web_root() {
   [ -z "$WEB_ROOT" ] || { printf '%s' "$WEB_ROOT"; return 0; }
   for d in /home/html /var/www/html /home/sh2/web /var/www; do
-    [ -d "$d/MimiSetup" ] && { printf '%s' "$d"; return 0; }
+    [ -d "$d" ] && { printf '%s' "$d"; return 0; }
   done
   printf ''
 }
@@ -115,7 +114,7 @@ chmod +x "$TMP/$ASSET"
 
 # --- веб-сервер: демон рядом с панелью умного дома -------------------------
 #
-# На сервере уже стоит веб-сервер с панелью MimiSetup. Логично открывать демон
+# Если на сервере уже стоит веб-сервер, логично открывать демон
 # оттуда же — http://сервер/microart/, — а не отдельным портом: один адрес,
 # одна точка входа, и порт 8081 не надо помнить и открывать.
 PROXY=no
@@ -193,78 +192,7 @@ PROXYEOF
   esac
 }
 
-# add_panel_tab добавляет вкладку «Инверторы» в верхнее меню панели MimiSetup.
-#
-# Сам app.js не трогаем: он собран Sencha Cmd в один минифицированный файл, и
-# правка в нём не переживёт обновления панели, а найти её потом невозможно.
-# Вместо этого кладём рядом свой файл и подключаем его строкой в index.php —
-# читаемой, восстановимой и заметной.
-add_panel_tab() {
-  PANEL="$WEB_ROOT/MimiSetup"
-  [ -d "$PANEL" ] && [ -f "$PANEL/index.php" ] || return 0
-
-  ans=$(ask "Добавить вкладку «Инверторы» в меню панели MimiSetup? [Д/н]: " "д")
-  case "$ans" in
-    [нНnN]*) return 0 ;;
-  esac
-
-  # Файл вкладки всегда перезаписываем: он наш, и в нём мог поменяться адрес.
-  download "mimisetup-microart-tab.js" "$PANEL/microart-tab.js" 2>/dev/null || {
-    say "Не удалось получить файл вкладки — пропускаем."
-    return 0
-  }
-
-  # Адрес демона во вкладке. За прокси это подкаталог того же сервера, без
-  # прокси — прямой порт: вкладка полезна в обоих случаях, просто во втором
-  # адрес абсолютный.
-  if [ "$PROXY" = yes ]; then
-    TAB_URL="$BASE_PATH/"
-  else
-    TAB_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-    [ -n "$TAB_IP" ] || TAB_IP="127.0.0.1"
-    TAB_URL="http://$TAB_IP:8081/"
-  fi
-
-  # Правим через временный файл: у sed -i разный синтаксис в GNU и BSD, и
-  # полагаться на конкретный означает однажды получить пустой файл.
-  sed "s#var DAEMON_URL = \"/microart/\";#var DAEMON_URL = \"$TAB_URL\";#" \
-    "$PANEL/microart-tab.js" > "$PANEL/microart-tab.js.tmp" &&
-    mv -f "$PANEL/microart-tab.js.tmp" "$PANEL/microart-tab.js"
-  chmod 0644 "$PANEL/microart-tab.js" 2>/dev/null || true
-
-  if grep -q "microart-tab.js" "$PANEL/index.php" 2>/dev/null; then
-    say "Вкладка «Инверторы» в панели уже подключена."
-    return 0
-  fi
-
-  # Резервная копия перед правкой чужого файла: восстановить должно быть проще,
-  # чем разбираться, что сломалось.
-  cp "$PANEL/index.php" "$PANEL/index.php.before-microart" 2>/dev/null || true
-
-  # Строка вставляется сразу после подключения app.js — к этому моменту
-  # фреймворк уже есть, а панель ещё не построена. Через awk, а не sed -i:
-  # у последнего разный синтаксис в GNU и BSD.
-  awk '{
-    print
-    if ($0 ~ /src="app\.js/ && !done) {
-      print "<script type=\"text/javascript\" src=\"microart-tab.js\"></script>"
-      done = 1
-    }
-  }' "$PANEL/index.php" > "$PANEL/index.php.tmp" 2>/dev/null
-
-  if [ -s "$PANEL/index.php.tmp" ] && grep -q "microart-tab.js" "$PANEL/index.php.tmp"; then
-    mv -f "$PANEL/index.php.tmp" "$PANEL/index.php"
-    say "Вкладка «Инверторы» добавлена в меню панели."
-    say "Обновление панели её снесёт — запустите этот скрипт повторно, и она вернётся."
-  else
-    rm -f "$PANEL/index.php.tmp"
-    say "Не удалось дописать index.php панели. Добавьте вручную после подключения app.js:"
-    say '    <script type="text/javascript" src="microart-tab.js"></script>'
-  fi
-}
-
 setup_proxy || say "Предупреждение: настроить веб-сервер не удалось."
-add_panel_tab || say "Предупреждение: вкладку в панель добавить не удалось."
 
 # За прокси демону незачем слушать наружу: снаружи к нему ходят через панель.
 if [ -z "$ADDR" ]; then
