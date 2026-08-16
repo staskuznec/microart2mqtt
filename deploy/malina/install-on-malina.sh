@@ -49,9 +49,28 @@ trap root_ro EXIT INT TERM
 
 # --- бинарник и управляющий скрипт (на /settings, там запись и так есть) -----
 mkdir -p "$DIR"
-install -m 0755 "$AGENT_BIN" "$DIR/malina-agent"
+# Бинарник ставим, только если в бандле он НЕ старее установленного. Иначе
+# получалось бы вот что: обновились кнопкой в вебе, устройство перезагрузилось,
+# бутстрап снова запустил этот установщик — и версия с карты откатила свежую.
+# Карта обновляется редко, веб — часто, поэтому побеждает та, что новее.
+ver_of() { [ -x "$1" ] && "$1" -version 2>/dev/null | tr -d 'v \t\r\n' || echo ""; }
+new_ver="$(ver_of "$AGENT_BIN")"
+cur_ver="$(ver_of "$DIR/malina-agent")"
+
+if [ -z "$cur_ver" ]; then
+    install -m 0755 "$AGENT_BIN" "$DIR/malina-agent"
+    say "агент установлен в $DIR (версия ${new_ver:-неизвестна})"
+elif [ "$new_ver" = "$cur_ver" ]; then
+    say "агент уже версии ${cur_ver} — оставляю как есть"
+elif [ -n "$new_ver" ] && \
+     [ "$(printf '%s\n%s\n' "$new_ver" "$cur_ver" | sort -V | tail -1)" = "$new_ver" ]; then
+    install -m 0755 "$AGENT_BIN" "$DIR/malina-agent"
+    say "агент обновлён с ${cur_ver} до ${new_ver}"
+else
+    say "на карте версия ${new_ver:-неизвестна}, установлена ${cur_ver} — не откатываю"
+fi
+
 [ -n "$CTL_SRC" ] && install -m 0755 "$CTL_SRC" "$DIR/agent-ctl.sh"
-say "агент установлен в $DIR"
 
 # --- настройки по умолчанию, если ещё нет -----------------------------------
 if [ ! -f "$CFG" ]; then
