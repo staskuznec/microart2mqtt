@@ -64,7 +64,58 @@ func TestEnsureBootHook(t *testing.T) {
 	}
 }
 
-// Чужой файл без нашего блока не трогаем вовсе.
+// Хук из образа, собранного до исправления сборщика: блок продублирован, от
+// прежних прогонов остались висячие «done». Для sh это синтаксическая ошибка —
+// их строки после нашей вставки на загрузке не выполнялись вовсе. Агент должен
+// вычистить мусор, а не добавить к нему ещё один блок.
+func TestEnsureBootHookCleansAccumulatedJunk(t *testing.T) {
+	junk := "#!/bin/sh\n" +
+		"# microart2mqtt: console autologin + agent bootstrap (added offline)\n" +
+		"setsid /sbin/agetty --autologin pi --noclear tty1 linux >/dev/null 2>&1 &\n" +
+		hookOld + "\n" +
+		"  [ -f \"$i\" ] && { sh \"$i\" >/settings/html/mqtt-install.txt 2>&1 & break; }\ndone\n" +
+		"  [ -f \"$i\" ] && { sh \"$i\" >/settings/html/mqtt-install.txt 2>&1 & break; }\ndone\n" +
+		"mkdir /var/log/nginx\n/usr/sbin/my_init.sh\nexit 0\n"
+
+	// Убеждаемся, что исходник и правда сломан, — иначе тест ничего не проверяет.
+	dir := t.TempDir()
+	broken := filepath.Join(dir, "broken.sh")
+	if err := os.WriteFile(broken, []byte(junk), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("sh", "-n", broken).Run(); err == nil {
+		t.Fatal("подготовленный хук должен быть синтаксически сломан")
+	}
+
+	path := filepath.Join(dir, "myfolders.sh")
+	if err := os.WriteFile(path, []byte(junk), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureBootHook(path); err != nil {
+		t.Fatalf("правка не прошла: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("sh", "-n", path).CombinedOutput(); err != nil {
+		t.Errorf("после правки хук всё ещё не разбирается: %v\n%s", err, out)
+	}
+	if n := strings.Count(string(got), "for i in /boot/MICROART"); n != 1 {
+		t.Errorf("блоков установщика: %d, ожидался один\n%s", n, got)
+	}
+	if n := strings.Count(string(got), "\ndone\n"); n != 1 {
+		t.Errorf("«done» в файле: %d, ожидался один\n%s", n, got)
+	}
+	for _, keep := range []string{"mkdir /var/log/nginx", "/usr/sbin/my_init.sh", "exit 0"} {
+		if !strings.Contains(string(got), keep) {
+			t.Errorf("из хука пропало: %q", keep)
+		}
+	}
+}
+
+// Чужой файл без нашей метки не трогаем вовсе.
 func TestEnsureBootHookLeavesForeignFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "myfolders.sh")

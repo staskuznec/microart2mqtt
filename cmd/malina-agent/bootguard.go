@@ -33,8 +33,8 @@ const hookOld = `for i in /boot/MICROART/INSTALL.SH /boot/microart/install-on-ma
   [ -f "$i" ] && { sh "$i" >/settings/html/mqtt-install.txt 2>&1 & break; }
 done`
 
-// hookGuard — он же, но с проверкой. Тот же текст лежит в malina_bootstrap.py:
-// новые образы получают его сразу, а этот код чинит уже прошитые устройства.
+// hookGuard — он же, но с проверкой. Тот же текст вписывает в образ
+// malina_bootstrap.py: там он для новых прошивок, здесь — для уже прошитых.
 const hookGuard = `# Установщик с карты нужен, только когда агента нет, он негоден или служба
 # выключена. Иначе он на каждой загрузке возвращал бы версию из образа поверх
 # той, что поставили кнопкой «Обновить» в вебе.
@@ -48,26 +48,87 @@ fi`
 // guardMark — по нему узнаём, что защита уже стоит.
 const guardMark = "/settings/microart-mqtt/malina-agent -version"
 
-// ensureBootHook правит загрузочный хук, если он ещё без защиты. Возвращает
-// строку для журнала («» — делать нечего).
+// ourMark — наша метка в их скрипте. Нет её — устройство ставили не мы, не лезем.
+const ourMark = "# microart2mqtt"
+
+// ourLines — подстроки КАЖДОЙ строки, которую мы когда-либо вписывали. По ним
+// вычищаем прежние вставки: в образах, собранных до исправления сборщика,
+// накопились дубли блока с висячими «done», а это синтаксическая ошибка — всё,
+// что идёт в их скрипте дальше, на загрузке не выполнялось.
+var ourLines = []string{
+	ourMark,
+	"agetty --autologin pi",
+	"install-on-malina.sh",
+	"mkdir -p /boot/microart",
+	"mqtt-install.txt",
+	guardMark,
+	"systemctl is-enabled microart-mqtt",
+	"# Установщик с карты нужен",
+	"# выключена. Иначе",
+	"# той, что поставили",
+}
+
+// stripOurs убирает все наши прежние строки. Закрывающие «done»/«fi» удаляем
+// только когда они идут сразу за удалённой строкой: у них в скрипте свои циклы
+// и условия, трогать их нельзя.
+func stripOurs(text string) string {
+	var kept []string
+	dropped := false
+	for _, ln := range strings.Split(text, "\n") {
+		if containsAny(ln, ourLines) {
+			dropped = true
+			continue
+		}
+		if dropped {
+			switch strings.TrimSpace(ln) {
+			case "done", "fi":
+				continue
+			}
+		}
+		dropped = false
+		kept = append(kept, ln)
+	}
+	return strings.Join(kept, "\n")
+}
+
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureBootHook приводит загрузочный хук к нужному виду: одна наша вставка,
+// с проверкой установленного агента. Возвращает строку для журнала («» —
+// делать нечего).
 //
-// Правка адресная: если ожидаемого блока в файле нет, не трогаем ничего.
-// Получившийся текст перед заменой проверяем через «sh -n» — сломанный
-// myfolders.sh отразился бы на всей загрузке устройства, а не только на нас.
+// Если нашей метки в файле нет, не трогаем ничего. Результат перед записью
+// прогоняется через «sh -n»: сломанный myfolders.sh рушит не наш агент, а всю
+// загрузку устройства.
 func ensureBootHook(path string) (string, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return "", nil // нет файла — устройство поставлено иначе, не наше дело
 	}
 	text := string(src)
-	if strings.Contains(text, guardMark) {
-		return "", nil // уже защищено
-	}
-	if !strings.Contains(text, hookOld) {
-		return "", nil // нашего блока нет либо он изменён — руками не лезем
+	if !strings.Contains(text, ourMark) {
+		return "", nil
 	}
 
-	updated := strings.Replace(text, hookOld, hookGuard, 1)
+	cleaned := stripOurs(text)
+	nl := strings.Index(cleaned, "\n")
+	if nl < 0 {
+		return "", nil // нет переносов — неожиданный формат, не лезем
+	}
+	block := ourMark + ": console autologin + agent bootstrap (added offline)\n" +
+		"setsid /sbin/agetty --autologin pi --noclear tty1 linux >/dev/null 2>&1 &\n" +
+		hookGuard + "\n"
+	updated := cleaned[:nl+1] + block + cleaned[nl+1:]
+	if updated == text {
+		return "", nil // уже в нужном виде
+	}
 	if err := shSyntaxOK(updated); err != nil {
 		return "", fmt.Errorf("правка не прошла проверку синтаксиса, оставляю как было: %w", err)
 	}
@@ -80,7 +141,7 @@ func ensureBootHook(path string) (string, error) {
 	if err := writeMaybeRO(path, []byte(updated), 0o755); err != nil {
 		return "", err
 	}
-	return "загрузочный хук больше не откатывает версию при перезагрузке", nil
+	return "загрузочный хук приведён в порядок: версия переживёт перезагрузку", nil
 }
 
 // shSyntaxOK прогоняет текст через «sh -n»: разбор без выполнения.
