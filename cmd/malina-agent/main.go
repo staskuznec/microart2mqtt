@@ -85,6 +85,18 @@ func main() {
 	ag.updates = update.New(version, slog.Default())
 	go ag.updates.Run(ctx)
 
+	// Загрузочный хук: чтобы установщик с карты не возвращал версию из образа
+	// поверх той, что поставили через веб.
+	if msg, err := ensureBootHook(bootHookPath); err != nil {
+		slog.Warn("загрузочный хук", "err", err)
+	} else if msg != "" {
+		slog.Info(msg)
+	}
+
+	// Аварийную копию на карте освежаем в фоне — но только после того, как эта
+	// версия проработает какое-то время (см. cardcopy.go).
+	go refreshCardCopy(ag.selfPath)
+
 	// Веб-страница агента поднимается один раз на всё время работы. Порт берём
 	// из первого чтения конфига (при смене порта нужен рестарт агента).
 	startCfg, _ := LoadConfig(*cfgPath)

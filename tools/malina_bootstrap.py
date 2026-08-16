@@ -41,9 +41,16 @@ BLOCK = (
     # Установщик кладётся в образ инструментом fat_put.py именами 8.3, поэтому
     # на смонтированном vfat он виден как /boot/MICROART/INSTALL.SH. Если файлы
     # скопировали руками, имена будут длинными — проверяем оба варианта.
+    # Установщик с карты запускаем, только если агента нет, он негоден или
+    # служба выключена: иначе он на каждой загрузке возвращал бы версию из
+    # образа поверх той, что поставили кнопкой «Обновить» в вебе. Тот же текст
+    # умеет вписывать сам агент (bootguard.go) — для уже прошитых устройств.
+    "if ! /settings/microart-mqtt/malina-agent -version >/dev/null 2>&1 || \\\n"
+    "   ! systemctl is-enabled microart-mqtt >/dev/null 2>&1; then\n"
     "for i in /boot/MICROART/INSTALL.SH /boot/microart/install-on-malina.sh; do\n"
     "  [ -f \"$i\" ] && { sh \"$i\" >/settings/html/mqtt-install.txt 2>&1 & break; }\n"
     "done\n"
+    "fi\n"
 )
 
 
