@@ -20,15 +20,28 @@
 set -u
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
-DIR=/settings/microart-mqtt
-WEB=/settings/html
-CFG=/settings/web-data/mqtt.json
-NGINX_DIR=/settings/nginx/sites-available
-UNIT=/etc/systemd/system/microart-mqtt.service
-SERVICE=microart-mqtt
-PORT=8091
+# Пути можно переопределить окружением — так установщик целиком прогоняется в
+# песочнице на обычной машине. На устройстве используются значения по умолчанию.
+DIR=${DIR:-/settings/microart-mqtt}
+WEB=${WEB:-/settings/html}
+CFG=${CFG:-/settings/web-data/mqtt.json}
+NGINX_DIR=${NGINX_DIR:-/settings/nginx/sites-available}
+UNIT=${UNIT:-/etc/systemd/system/microart-mqtt.service}
+SERVICE=${SERVICE:-microart-mqtt}
+PORT=${PORT:-8091}
 
 say() { echo "install: $*"; }
+
+# Агенту нужно секунду-другую, чтобы подняться; ждём до 10 с, а не гадаем.
+wait_active() {
+    i=0
+    while [ $i -lt 10 ]; do
+        systemctl is-active --quiet "$SERVICE" 2>/dev/null && return 0
+        sleep 1
+        i=$((i+1))
+    done
+    return 1
+}
 
 # Файлы рядом могут называться и длинно (копировали руками), и в 8.3 — так их
 # кладёт в образ fat_put.py, и на vfat они видны заглавными. Ищем оба варианта.
@@ -101,9 +114,21 @@ if root_rw; then
         systemctl daemon-reload 2>/dev/null
         systemctl enable "$SERVICE" >/dev/null 2>&1
         systemctl restart "$SERVICE" 2>/dev/null
-        sleep 1
-        if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+        if wait_active; then
             say "служба $SERVICE установлена и запущена (systemd)"
+        elif [ -n "$cur_ver" ] && [ "$cur_ver" != "$new_ver" ]; then
+            # Установленная версия (обновлялись через веб) не поднимается.
+            # Возвращаем версию с карты: она заведомо рабочая, а иначе устройство
+            # осталось бы без веб-интерфейса — то есть без способа починить его
+            # удалённо, и пришлось бы ехать с картой.
+            say "служба не поднялась на версии ${cur_ver} — откатываю к версии с карты (${new_ver:-неизвестна})"
+            install -m 0755 "$AGENT_BIN" "$DIR/malina-agent"
+            systemctl restart "$SERVICE" 2>/dev/null
+            if wait_active; then
+                say "откат удался, служба работает"
+            else
+                say "служба не запускается и после отката — смотрите http://<ip>/mqtt-agent.txt"
+            fi
         else
             say "служба установлена, но не активна — смотрите http://<ip>/mqtt-agent.txt"
         fi

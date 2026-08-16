@@ -11,9 +11,14 @@ package main
 // Зацепка: перед установкой он ЗАПУСКАЕТ скачанный файл как
 // «<каталог>/.malina-agent.new -version», чтобы проверить, что тот рабочий, и
 // делает это от root. То есть в этот момент новая версия уже выполняется на
-// устройстве. Ею и чиним: ставим себя на штатное место, обновляем копию в
-// /boot и через несколько секунд перезапускаем службу. Для человека это
-// по-прежнему одно нажатие «Обновить» — карту вынимать не нужно.
+// устройстве. Ею и чиним: ставим себя на штатное место и через несколько
+// секунд перезапускаем службу. Для человека это по-прежнему одно нажатие
+// «Обновить» — карту вынимать не нужно.
+//
+// Раздел /boot при этом НЕ трогаем. Во-первых, его порча — единственная беда,
+// которая и правда потребовала бы ехать перешивать. Во-вторых, установщик с
+// карты ставит свою версию на каждой загрузке, и это наша страховка: если
+// новая версия окажется негодной, достаточно передёрнуть питание.
 //
 // Срабатывает только когда нас запустил СТАРЫЙ агент: исправленная версия при
 // такой же проверке выставляет probeEnv, и починка себя не трогает.
@@ -23,7 +28,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -90,13 +94,7 @@ func maybeRepair() {
 	}
 	say("новая версия установлена: %s", target)
 
-	// 2. Копия в /boot, иначе установщик с карты на следующей загрузке вернёт
-	// версию, записанную в образ.
-	for _, m := range bootRefresh(data) {
-		say("%s", m)
-	}
-
-	// 3. Перезапуск службы: только он поднимет новый бинарник, потому что
+	// 2. Перезапуск службы: только он поднимет новый бинарник, потому что
 	// перезапуск в старой версии сломан.
 	if err := scheduleRestart(dir); err != nil {
 		say("не удалось назначить перезапуск: %v — перезагрузите устройство", err)
@@ -129,76 +127,6 @@ func replaceFile(path string, data []byte) error {
 		return err
 	}
 	return os.Chmod(path, 0o755)
-}
-
-// bootRefresh кладёт бинарник в набор на карте (/boot смонтирован ro, поэтому
-// перемонтируем на запись и возвращаем обратно). Установщик оттуда запускается
-// на каждой загрузке, и если там останется старая версия — она вернётся.
-//
-// Возвращает строки для журнала: молча не делаем ничего, но и не считаем
-// неудачу здесь фатальной — на работу уже установленного агента она не влияет.
-func bootRefresh(data []byte) []string {
-	var out []string
-	for _, d := range []string{"/boot/MICROART", "/boot/microart"} {
-		if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
-			continue
-		}
-		name := ""
-		for _, n := range []string{"AGENT", "malina-agent", "agent"} {
-			if _, err := os.Stat(filepath.Join(d, n)); err == nil {
-				name = n
-				break
-			}
-		}
-		if name == "" {
-			continue
-		}
-		path := filepath.Join(d, name)
-
-		wasRO := bootIsReadOnly()
-		if wasRO {
-			if err := remountBoot("rw"); err != nil {
-				out = append(out, fmt.Sprintf("/boot: не перемонтировать на запись: %v", err))
-				continue
-			}
-		}
-		err := replaceFile(path, data)
-		syscall.Sync()
-		if wasRO {
-			if rerr := remountBoot("ro"); rerr != nil {
-				out = append(out, fmt.Sprintf("/boot: не вернуть в режим чтения: %v", rerr))
-			}
-		}
-		if err != nil {
-			out = append(out, fmt.Sprintf("%s: %v", path, err))
-			continue
-		}
-		out = append(out, "обновлён набор на карте: "+path)
-	}
-	return out
-}
-
-func bootIsReadOnly() bool {
-	b, err := os.ReadFile("/proc/mounts")
-	if err != nil {
-		return true // не знаем — считаем, что ro, попытка перемонтировать безвредна
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
-		if len(f) >= 4 && f[1] == "/boot" {
-			for _, o := range strings.Split(f[3], ",") {
-				if o == "rw" {
-					return false
-				}
-			}
-			return true
-		}
-	}
-	return true
-}
-
-func remountBoot(mode string) error {
-	return exec.Command("mount", "-o", "remount,"+mode, "/boot").Run()
 }
 
 // scheduleRestart запускает отсоединённый перезапуск с задержкой. Отдельным
