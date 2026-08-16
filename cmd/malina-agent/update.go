@@ -65,7 +65,11 @@ func (a *agent) selfUpdate() error {
 	if err := os.WriteFile(tmp, newBin, 0o755); err != nil {
 		return fmt.Errorf("запись временного файла: %w", err)
 	}
-	if out, err := exec.Command(tmp, "-version").Output(); err != nil {
+	// probeEnv помечает, что файл запускает уже исправленная версия: чинить
+	// установку (см. repair.go) в этом случае не нужно.
+	probe := exec.Command(tmp, "-version")
+	probe.Env = append(os.Environ(), probeEnv+"=1")
+	if out, err := probe.Output(); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("новый бинарник не запускается: %w", err)
 	} else {
@@ -80,6 +84,13 @@ func (a *agent) selfUpdate() error {
 		return fmt.Errorf("замена бинарника: %w", err)
 	}
 	_ = os.Chmod(self, 0o755)
+
+	// Обновляем и копию на карте: установщик оттуда отрабатывает на каждой
+	// загрузке, и если оставить там прежнюю версию, она вернётся после
+	// перезагрузки.
+	for _, m := range bootRefresh(newBin) {
+		slog.Info("самообновление: " + m)
+	}
 
 	slog.Info("самообновление: новая версия установлена, готов к перезапуску", "path", self)
 	return nil

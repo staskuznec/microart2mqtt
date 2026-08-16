@@ -48,6 +48,9 @@ func main() {
 	flag.Parse()
 	if *showVer {
 		fmt.Println(version)
+		// Если нас запустил на проверку старый агент со сломанным
+		// перезапуском — чиним установку за него (repair.go).
+		maybeRepair()
 		return
 	}
 
